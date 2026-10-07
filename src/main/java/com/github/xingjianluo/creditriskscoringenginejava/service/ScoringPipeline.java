@@ -1,8 +1,10 @@
 package com.github.xingjianluo.creditriskscoringenginejava.service;
 
 import com.github.xingjianluo.creditriskscoringenginejava.baseline.AccountBaselineService;
+import com.github.xingjianluo.creditriskscoringenginejava.caseflow.AccountCaseService;
 import com.github.xingjianluo.creditriskscoringenginejava.caseflow.ReviewCaseService;
 import com.github.xingjianluo.creditriskscoringenginejava.ledger.TransactionLedger;
+import com.github.xingjianluo.creditriskscoringenginejava.model.AccountCase;
 import com.github.xingjianluo.creditriskscoringenginejava.model.BaselineSnapshot;
 import com.github.xingjianluo.creditriskscoringenginejava.model.FactorContribution;
 import com.github.xingjianluo.creditriskscoringenginejava.model.RejectionRecord;
@@ -43,18 +45,20 @@ public class ScoringPipeline {
     private final RiskRuleEngine ruleEngine;
     private final RuleVersionRegistry versionRegistry;
     private final ReviewCaseService caseService;
+    private final AccountCaseService accountCaseService;
     private final Clock clock;
 
     public ScoringPipeline(TransactionLedger ledger, TransactionValidator validator,
                            AccountBaselineService baselineService, RiskRuleEngine ruleEngine,
                            RuleVersionRegistry versionRegistry, ReviewCaseService caseService,
-                           Clock clock) {
+                           AccountCaseService accountCaseService, Clock clock) {
         this.ledger = ledger;
         this.validator = validator;
         this.baselineService = baselineService;
         this.ruleEngine = ruleEngine;
         this.versionRegistry = versionRegistry;
         this.caseService = caseService;
+        this.accountCaseService = accountCaseService;
         this.clock = clock;
     }
 
@@ -94,15 +98,18 @@ public class ScoringPipeline {
 
         Optional<ReviewCase> opened = caseService.openCaseIfNeeded(result);
         List<String> caseIds = opened.map(c -> List.of(c.getCaseId())).orElse(List.of());
+        // 账户级归集：高风险流水额外关联到账户维度案件（只追加，不影响单笔结论与案件）
+        Optional<AccountCase> accountCase = accountCaseService.linkIfNeeded(result);
 
         log.info("[SCORE] tx={} account={} 输入信号(amount={},ccy={},time={},cp={},country={},channel={}) "
-                        + "基线(prior={},avg={},window={}) 命中规则={} 判定依据=总分{}/等级{}/版本{} 案件={}",
+                        + "基线(prior={},avg={},window={}) 命中规则={} 判定依据=总分{}/等级{}/版本{} 案件={} 账户归集案={}",
                 tx.transactionId(), tx.accountId(), tx.amount(), tx.currency(), tx.eventTime(),
                 tx.counterpartyAccount(), tx.counterpartyCountry(), tx.channel(),
                 baseline.priorCount(), baseline.avgAmount(), baseline.recentWindowCount(),
                 contributions.stream().map(c -> c.ruleCode() + "+" + c.points()).toList(),
                 total, level, version.version(),
-                caseIds.isEmpty() ? "无" : caseIds.get(0));
+                caseIds.isEmpty() ? "无" : caseIds.get(0),
+                accountCase.map(AccountCase::getCaseId).orElse("无"));
 
         return SubmissionOutcome.scored(result, false, caseIds);
     }

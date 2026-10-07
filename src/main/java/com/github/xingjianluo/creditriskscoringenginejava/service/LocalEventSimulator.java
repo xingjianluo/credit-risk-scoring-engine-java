@@ -1,5 +1,6 @@
 package com.github.xingjianluo.creditriskscoringenginejava.service;
 
+import com.github.xingjianluo.creditriskscoringenginejava.caseflow.AccountCaseService;
 import com.github.xingjianluo.creditriskscoringenginejava.caseflow.ReviewCaseService;
 import com.github.xingjianluo.creditriskscoringenginejava.ledger.TransactionLedger;
 import com.github.xingjianluo.creditriskscoringenginejava.model.ArrivalMode;
@@ -40,17 +41,20 @@ public class LocalEventSimulator {
     private final RiskScoringService scoringService;
     private final TransactionLedger ledger;
     private final ReviewCaseService caseService;
+    private final AccountCaseService accountCaseService;
 
     public LocalEventSimulator(RiskScoringService scoringService, TransactionLedger ledger,
-                               ReviewCaseService caseService) {
+                               ReviewCaseService caseService, AccountCaseService accountCaseService) {
         this.scoringService = scoringService;
         this.ledger = ledger;
         this.caseService = caseService;
+        this.accountCaseService = accountCaseService;
     }
 
     public BatchReport run(String runId, List<Transaction> events, ArrivalMode mode) {
         ledger.clear();
         caseService.clear();
+        accountCaseService.clear();
         String id = runId == null ? UUID.randomUUID().toString() : runId;
         log.info("[SIM-START] runId={} mode={} inputs={}", id, mode, events.size());
 
@@ -58,9 +62,10 @@ public class LocalEventSimulator {
         List<SubmissionOutcome> outcomes = scoringService.submitBatch(arrived);
 
         BatchReport report = aggregate(id, mode, events, outcomes);
-        log.info("[SIM-END] runId={} mode={} 唯一={} 接受={} 拒绝={} 重复={} 开案={}",
+        log.info("[SIM-END] runId={} mode={} 唯一={} 接受={} 拒绝={} 重复={} 开案={} 账户归集案={}",
                 id, mode, report.uniqueTransactions(), report.accepted(),
-                report.rejected(), report.duplicates(), report.casesOpened());
+                report.rejected(), report.duplicates(), report.casesOpened(),
+                report.accountCasesOpened());
         return report;
     }
 
@@ -117,7 +122,9 @@ public class LocalEventSimulator {
         int rejected = (int) outcomes.stream().filter(o -> !o.accepted()).count();
         int duplicates = (int) outcomes.stream().filter(SubmissionOutcome::duplicate).count();
         int casesOpened = caseService.all().size();
+        int accountCasesOpened = accountCaseService.all().size();
         return new BatchReport(runId, mode, inputs.size(), uniqueIds.size(),
-                accepted, rejected, duplicates, casesOpened, List.copyOf(outcomes));
+                accepted, rejected, duplicates, casesOpened, accountCasesOpened,
+                List.copyOf(outcomes));
     }
 }

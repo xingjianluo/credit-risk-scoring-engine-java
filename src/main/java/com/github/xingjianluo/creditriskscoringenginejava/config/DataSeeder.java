@@ -48,18 +48,23 @@ public class DataSeeder implements CommandLineRunner {
         BatchReport ordered = simulator.run("demo-ordered", events, ArrivalMode.IN_ORDER);
         BatchReport shuffled = simulator.run("demo-shuffled", events, ArrivalMode.OUT_OF_ORDER);
         BatchReport concurrent = simulator.run("demo-concurrent", events, ArrivalMode.CONCURRENT);
-        log.info("[DEMO] 顺序: 接受={} 拒绝={} 重复={} 开案={}",
-                ordered.accepted(), ordered.rejected(), ordered.duplicates(), ordered.casesOpened());
-        log.info("[DEMO] 乱序: 接受={} 拒绝={} 重复={} 开案={}",
-                shuffled.accepted(), shuffled.rejected(), shuffled.duplicates(), shuffled.casesOpened());
-        log.info("[DEMO] 并发: 接受={} 拒绝={} 重复={} 开案={}",
-                concurrent.accepted(), concurrent.rejected(), concurrent.duplicates(), concurrent.casesOpened());
+        log.info("[DEMO] 顺序: 接受={} 拒绝={} 重复={} 开案={} 账户归集案={}",
+                ordered.accepted(), ordered.rejected(), ordered.duplicates(), ordered.casesOpened(),
+                ordered.accountCasesOpened());
+        log.info("[DEMO] 乱序: 接受={} 拒绝={} 重复={} 开案={} 账户归集案={}",
+                shuffled.accepted(), shuffled.rejected(), shuffled.duplicates(), shuffled.casesOpened(),
+                shuffled.accountCasesOpened());
+        log.info("[DEMO] 并发: 接受={} 拒绝={} 重复={} 开案={} 账户归集案={}",
+                concurrent.accepted(), concurrent.rejected(), concurrent.duplicates(), concurrent.casesOpened(),
+                concurrent.accountCasesOpened());
         boolean same = ordered.accepted() == shuffled.accepted()
                 && ordered.accepted() == concurrent.accepted()
                 && ordered.rejected() == shuffled.rejected()
                 && ordered.rejected() == concurrent.rejected()
                 && ordered.casesOpened() == shuffled.casesOpened()
-                && ordered.casesOpened() == concurrent.casesOpened();
+                && ordered.casesOpened() == concurrent.casesOpened()
+                && ordered.accountCasesOpened() == shuffled.accountCasesOpened()
+                && ordered.accountCasesOpened() == concurrent.accountCasesOpened();
         log.info("[DEMO] 三种到达方式计数一致: {}", same);
     }
 

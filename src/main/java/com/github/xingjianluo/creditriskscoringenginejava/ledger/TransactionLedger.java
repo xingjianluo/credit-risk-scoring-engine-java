@@ -23,6 +23,9 @@ public class TransactionLedger {
     private final ConcurrentMap<String, Transaction> transactions = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, RiskScoreResult> scores = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, RejectionRecord> rejections = new ConcurrentHashMap<>();
+    /** 无交易 ID 的拒绝留痕（无法按 ID 索引，仍完整保留，绝不静默丢弃）。 */
+    private final List<RejectionRecord> anonymousRejections =
+            java.util.Collections.synchronizedList(new ArrayList<>());
     private final ConcurrentMap<String, List<Transaction>> byAccount = new ConcurrentHashMap<>();
 
     public boolean contains(String transactionId) {
@@ -33,11 +36,13 @@ public class TransactionLedger {
 
     /**
      * 仅当交易 ID 首次出现时入账。
+     * 账户 ID 缺失的候选流水也允许入账（后续由校验拒绝并移除），
+     * 但不进入账户索引，避免空键异常。
      * @return 入账成功返回 null；已存在（重复提交）返回既有流水
      */
     public Transaction putIfAbsentTransaction(Transaction tx) {
         Transaction existing = transactions.putIfAbsent(tx.transactionId(), tx);
-        if (existing == null) {
+        if (existing == null && tx.accountId() != null) {
             byAccount.computeIfAbsent(tx.accountId(), k ->
                     java.util.Collections.synchronizedList(new ArrayList<>())).add(tx);
         }
@@ -65,9 +70,13 @@ public class TransactionLedger {
      * 同时移除该交易，使其不出现在历史基线中。
      */
     public void saveRejectionForAcceptedTx(RejectionRecord rejection) {
+        if (rejection.transactionId() == null) {
+            anonymousRejections.add(rejection);
+            return;
+        }
         rejections.putIfAbsent(rejection.transactionId(), rejection);
         Transaction removed = transactions.remove(rejection.transactionId());
-        if (removed != null) {
+        if (removed != null && removed.accountId() != null) {
             List<Transaction> list = byAccount.get(removed.accountId());
             if (list != null) {
                 synchronized (list) {
@@ -78,6 +87,11 @@ public class TransactionLedger {
     }
 
     public void saveRejection(RejectionRecord rejection) {
+        if (rejection.transactionId() == null) {
+            // 无 ID 无法按键索引，转入匿名留痕列表，避免 ConcurrentHashMap 空键 NPE
+            anonymousRejections.add(rejection);
+            return;
+        }
         rejections.putIfAbsent(rejection.transactionId(), rejection);
     }
 
@@ -100,7 +114,11 @@ public class TransactionLedger {
     }
 
     public List<RejectionRecord> allRejections() {
-        return List.copyOf(rejections.values());
+        List<RejectionRecord> all = new ArrayList<>(rejections.values());
+        synchronized (anonymousRejections) {
+            all.addAll(anonymousRejections);
+        }
+        return List.copyOf(all);
     }
 
     /** 清空账本（供模拟器/测试隔离不同到达方式时使用）。 */
@@ -108,6 +126,7 @@ public class TransactionLedger {
         transactions.clear();
         scores.clear();
         rejections.clear();
+        anonymousRejections.clear();
         byAccount.clear();
     }
 }

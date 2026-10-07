@@ -1,6 +1,13 @@
 package com.github.xingjianluo.creditriskscoringenginejava.caseflow;
 
+import com.github.xingjianluo.creditriskscoringenginejava.exception.BatchDispositionRejectedException;
 import com.github.xingjianluo.creditriskscoringenginejava.exception.CaseNotFoundException;
+import com.github.xingjianluo.creditriskscoringenginejava.exception.CasePermissionDeniedException;
+import com.github.xingjianluo.creditriskscoringenginejava.exception.IllegalCaseTransitionException;
+import com.github.xingjianluo.creditriskscoringenginejava.model.BatchDispositionRequest;
+import com.github.xingjianluo.creditriskscoringenginejava.model.BatchDispositionResult;
+import com.github.xingjianluo.creditriskscoringenginejava.model.BatchItemFailure;
+import com.github.xingjianluo.creditriskscoringenginejava.model.CaseAction;
 import com.github.xingjianluo.creditriskscoringenginejava.model.CaseEvent;
 import com.github.xingjianluo.creditriskscoringenginejava.model.CaseStatus;
 import com.github.xingjianluo.creditriskscoringenginejava.model.DispositionRequest;
@@ -13,8 +20,11 @@ import org.springframework.stereotype.Service;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -39,6 +49,10 @@ public class ReviewCaseService {
 
     private final ConcurrentMap<String, ReviewCase> casesById = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, String> txToCase = new ConcurrentHashMap<>();
+    /** 批次幂等表：batchId -> 首次批量处置结果。 */
+    private final ConcurrentMap<String, BatchDispositionResult> batchResults = new ConcurrentHashMap<>();
+    /** 批次互斥锁：批量处置整体串行，保证并发批次与串行执行结果一致。 */
+    private final Object batchMutex = new Object();
     private final AtomicLong sequence = new AtomicLong();
 
     public ReviewCaseService(CaseStateMachine stateMachine, Clock clock) {
@@ -74,22 +88,129 @@ public class ReviewCaseService {
     /** 应用处置动作；非法迁移/权限不足由状态机抛出可区分异常。 */
     public ReviewCase apply(DispositionRequest request) {
         ReviewCase target = get(request.caseId());
-        synchronized (target) {
-            CaseStatus from = target.getStatus();
-            CaseStatus to = stateMachine.transition(target, request);
-            Instant now = Instant.now(clock);
-            target.setStatus(to);
-            if (request.action() == com.github.xingjianluo.creditriskscoringenginejava.model.CaseAction.ASSIGN) {
-                target.setAssignee(request.reviewer());
-            }
-            target.setUpdatedAt(now);
-            target.appendEvent(new CaseEvent(target.getCaseId(), from, to,
-                    request.reviewer(), request.role(), request.note(), now));
-            log.info("[CASE] 处置 caseId={} action={} {}->{} reviewer={} role={} note={}",
-                    target.getCaseId(), request.action(), from, to,
-                    request.reviewer(), request.role(), request.note());
+        target.getLock().lock();
+        try {
+            CaseStatus to = stateMachine.transition(target.getStatus(), request);
+            mutate(target, request, to);
             return target;
+        } finally {
+            target.getLock().unlock();
         }
+    }
+
+    /**
+     * 批量处置（all-or-nothing + 批次幂等）。
+     *
+     * <ul>
+     *   <li>同一 batchId 重复提交返回首次结果（duplicate=true），不产生重复处置记录；</li>
+     *   <li>先在所有目标案件锁内逐项校验（权限 + 迁移合法性），任一失败则整批拒绝，
+     *       抛 {@link BatchDispositionRejectedException}（逐项可区分原因），无任何状态变更；</li>
+     *   <li>案件按 caseId 固定顺序加锁，批次之间用批次互斥锁串行，
+     *       并发批量处置的最终状态与审计记录和串行执行一致。</li>
+     * </ul>
+     */
+    public BatchDispositionResult applyBatch(BatchDispositionRequest request) {
+        if (request == null || request.items() == null || request.items().isEmpty()) {
+            throw new IllegalArgumentException("批量处置请求为空：items 至少包含一项");
+        }
+        String batchId = request.batchId();
+        if (batchId == null || batchId.isBlank()) {
+            throw new IllegalArgumentException("批量处置缺少 batchId（批次幂等键）");
+        }
+        BatchDispositionResult existing = batchResults.get(batchId);
+        if (existing != null) {
+            log.info("[CASE-BATCH] batchId={} 重复提交，返回首次结果（已处置 {} 个案件）",
+                    batchId, existing.appliedCaseIds().size());
+            return existing.asDuplicate();
+        }
+        synchronized (batchMutex) {
+            existing = batchResults.get(batchId);
+            if (existing != null) {
+                return existing.asDuplicate();
+            }
+            // 1) 解析目标案件（不存在的案件直接记为失败项）
+            Map<String, ReviewCase> targets = new TreeMap<>();
+            List<BatchItemFailure> failures = new ArrayList<>();
+            for (DispositionRequest item : request.items()) {
+                String caseId = item == null ? null : item.caseId();
+                ReviewCase c = caseId == null ? null : casesById.get(caseId);
+                if (c == null) {
+                    failures.add(new BatchItemFailure(String.valueOf(caseId),
+                            "CASE_NOT_FOUND", "审查案件不存在: " + caseId));
+                } else {
+                    targets.putIfAbsent(caseId, c);
+                }
+            }
+            if (!failures.isEmpty()) {
+                log.warn("[CASE-BATCH] batchId={} 整批拒绝：{}", batchId, failures);
+                throw new BatchDispositionRejectedException(batchId, failures);
+            }
+            // 2) 按 caseId 固定顺序逐把加锁（全局顺序一致，避免死锁）
+            List<ReviewCase> locked = new ArrayList<>(targets.values());
+            lockAll(locked);
+            try {
+                // 3) 锁内逐项校验：任一不合法则整批拒绝，此时尚未产生任何变更
+                for (DispositionRequest item : request.items()) {
+                    ReviewCase target = targets.get(item.caseId());
+                    try {
+                        stateMachine.transition(target.getStatus(), item);
+                    } catch (CasePermissionDeniedException | IllegalCaseTransitionException e) {
+                        String code = e instanceof CasePermissionDeniedException
+                                ? "CASE_PERMISSION_DENIED" : "ILLEGAL_CASE_TRANSITION";
+                        List<BatchItemFailure> failure = List.of(
+                                new BatchItemFailure(item.caseId(), code, e.getMessage()));
+                        log.warn("[CASE-BATCH] batchId={} 整批拒绝：caseId={} {} {}",
+                                batchId, item.caseId(), code, e.getMessage());
+                        throw new BatchDispositionRejectedException(batchId, failure);
+                    }
+                }
+                // 4) 全部合法：逐项生效（复用单笔处置的审计留痕）
+                List<String> applied = new ArrayList<>();
+                for (DispositionRequest item : request.items()) {
+                    ReviewCase target = targets.get(item.caseId());
+                    CaseStatus to = stateMachine.transition(target.getStatus(), item);
+                    mutate(target, item, to);
+                    applied.add(target.getCaseId());
+                }
+                BatchDispositionResult result = new BatchDispositionResult(batchId, false,
+                        List.copyOf(applied), Instant.now(clock));
+                batchResults.put(batchId, result);
+                log.info("[CASE-BATCH] batchId={} 整批生效：案件={}", batchId, applied);
+                return result;
+            } finally {
+                unlockAll(locked);
+            }
+        }
+    }
+
+    /** 按列表顺序（调用方保证 caseId 升序）依次加锁，避免死锁。 */
+    private static void lockAll(List<ReviewCase> cases) {
+        for (ReviewCase c : cases) {
+            c.getLock().lock();
+        }
+    }
+
+    /** 按相反顺序解锁。 */
+    private static void unlockAll(List<ReviewCase> cases) {
+        for (int k = cases.size() - 1; k >= 0; k--) {
+            cases.get(k).getLock().unlock();
+        }
+    }
+
+    /** 在案件锁内执行状态变更与审计留痕（单笔与批量共用的生效逻辑）。 */
+    private void mutate(ReviewCase target, DispositionRequest request, CaseStatus to) {
+        CaseStatus from = target.getStatus();
+        Instant now = Instant.now(clock);
+        target.setStatus(to);
+        if (request.action() == CaseAction.ASSIGN) {
+            target.setAssignee(request.reviewer());
+        }
+        target.setUpdatedAt(now);
+        target.appendEvent(new CaseEvent(target.getCaseId(), from, to,
+                request.reviewer(), request.role(), request.note(), now));
+        log.info("[CASE] 处置 caseId={} action={} {}->{} reviewer={} role={} note={}",
+                target.getCaseId(), request.action(), from, to,
+                request.reviewer(), request.role(), request.note());
     }
 
     public ReviewCase get(String caseId) {
@@ -116,6 +237,7 @@ public class ReviewCaseService {
     public void clear() {
         casesById.clear();
         txToCase.clear();
+        batchResults.clear();
         sequence.set(0);
     }
 

@@ -4,9 +4,13 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 可疑活动审查案件（可变状态 + 不可变审计事件链）。同一交易至多一个案件。
+ *
+ * <p>处置通过 {@link #getLock()} 串行化：单笔处置与批量处置共用同一把锁，
+ * 批量处置按 caseId 固定顺序同时持有多把锁，保证并发下无死锁且结果等同串行。
  */
 public class ReviewCase {
 
@@ -17,6 +21,7 @@ public class ReviewCase {
     private final RiskLevel riskLevel;
     private final String ruleVersion;
     private final Instant openedAt;
+    private final ReentrantLock lock = new ReentrantLock();
 
     private CaseStatus status;
     private String assignee;
@@ -54,4 +59,7 @@ public class ReviewCase {
     public List<CaseEvent> getEvents() { return Collections.unmodifiableList(events); }
 
     public void appendEvent(CaseEvent event) { events.add(event); }
+
+    /** 案件处置锁（单笔与批量处置共用）。 */
+    public ReentrantLock getLock() { return lock; }
 }

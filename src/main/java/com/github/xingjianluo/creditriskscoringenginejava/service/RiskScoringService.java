@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -52,10 +53,11 @@ public class RiskScoringService {
     public SubmissionOutcome submit(Transaction tx) {
         String id = tx == null ? null : tx.transactionId();
         if (id == null || id.isBlank()) {
-            return submitBatch(List.of(tx)).get(0);
+            // Arrays.asList 允许 null 元素（List.of 不允许，会对空流水抛 NPE）
+            return submitBatch(Arrays.asList(tx)).get(0);
         }
         synchronized (txLocks.computeIfAbsent(id, k -> new Object())) {
-            return submitBatch(List.of(tx)).get(0);
+            return submitBatch(Arrays.asList(tx)).get(0);
         }
     }
 

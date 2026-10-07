@@ -39,6 +39,12 @@ public class RiskController {
         return scoringService.submit(tx);
     }
 
+    /** 批量提交：与单笔/模拟回放共用同一管线，异常输入逐条拒绝留痕、不影响同批正常流水。 */
+    @PostMapping("/transactions/batch")
+    public List<SubmissionOutcome> submitBatch(@RequestBody List<Transaction> txs) {
+        return scoringService.submitBatch(txs == null ? List.of() : txs);
+    }
+
     /** 查询首次结论：评分成功 200；被拒绝 422（带可区分原因码）；不存在 404。 */
     @GetMapping("/transactions/{id}")
     public ResponseEntity<?> get(@PathVariable String id) {
@@ -72,9 +78,21 @@ public class RiskController {
     /** 触发本地模拟：body 为 {"mode":"OUT_OF_ORDER","transactions":[...]}。 */
     @PostMapping("/simulate")
     public BatchReport simulate(@RequestBody SimulationRequest body) {
-        ArrivalMode mode = body.mode() == null ? ArrivalMode.IN_ORDER
-                : ArrivalMode.valueOf(body.mode());
-        return simulator.run(body.runId(), body.transactions(), mode);
+        ArrivalMode mode = parseMode(body.mode());
+        return simulator.run(body.runId(),
+                body.transactions() == null ? List.of() : body.transactions(), mode);
+    }
+
+    private static ArrivalMode parseMode(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return ArrivalMode.IN_ORDER;
+        }
+        try {
+            return ArrivalMode.valueOf(raw.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("未知到达方式: " + raw
+                    + "，可选值: IN_ORDER / OUT_OF_ORDER / CONCURRENT");
+        }
     }
 
     public record SimulationRequest(String runId, String mode, List<Transaction> transactions) {

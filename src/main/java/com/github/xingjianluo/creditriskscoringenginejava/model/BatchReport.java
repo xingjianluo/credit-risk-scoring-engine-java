@@ -14,5 +14,6 @@ public record BatchReport(
         int rejected,
         int duplicates,
         int casesOpened,
+        int accountCasesOpened,
         List<SubmissionOutcome> outcomes) {
 }

@@ -54,7 +54,11 @@ public class CaseStateMachine {
 
     /** 校验并执行迁移；非法迁移 / 权限不足分别抛出可区分异常。返回迁移后的状态。 */
     public CaseStatus transition(ReviewCase target, DispositionRequest request) {
-        CaseStatus from = target.getStatus();
+        return transition(target.getStatus(), request);
+    }
+
+    /** 按当前状态校验并执行迁移（供账户级归集案件等其它案件类型复用同一状态机）。 */
+    public CaseStatus transition(CaseStatus from, DispositionRequest request) {
         CaseAction action = request.action();
 
         // 先校验权限，再校验迁移合法性，保证两类拒绝原因稳定可区分
