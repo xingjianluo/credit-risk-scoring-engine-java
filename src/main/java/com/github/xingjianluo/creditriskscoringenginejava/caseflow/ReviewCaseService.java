@@ -1,6 +1,7 @@
 package com.github.xingjianluo.creditriskscoringenginejava.caseflow;
 
 import com.github.xingjianluo.creditriskscoringenginejava.exception.CaseNotFoundException;
+import com.github.xingjianluo.creditriskscoringenginejava.exception.InvalidRequestException;
 import com.github.xingjianluo.creditriskscoringenginejava.model.CaseEvent;
 import com.github.xingjianluo.creditriskscoringenginejava.model.CaseStatus;
 import com.github.xingjianluo.creditriskscoringenginejava.model.DispositionRequest;
@@ -73,6 +74,12 @@ public class ReviewCaseService {
 
     /** 应用处置动作；非法迁移/权限不足由状态机抛出可区分异常。 */
     public ReviewCase apply(DispositionRequest request) {
+        if (request == null || request.caseId() == null || request.caseId().isBlank()) {
+            throw new InvalidRequestException("INVALID_DISPOSITION_REQUEST", "处置请求缺失 caseId");
+        }
+        if (request.action() == null) {
+            throw new InvalidRequestException("INVALID_DISPOSITION_REQUEST", "处置请求缺失 action");
+        }
         ReviewCase target = get(request.caseId());
         synchronized (target) {
             CaseStatus from = target.getStatus();
@@ -98,6 +105,11 @@ public class ReviewCaseService {
             throw new CaseNotFoundException(caseId);
         }
         return c;
+    }
+
+    /** 按案件号查找（不存在返回 empty，不抛异常）。 */
+    public Optional<ReviewCase> find(String caseId) {
+        return Optional.ofNullable(caseId == null ? null : casesById.get(caseId));
     }
 
     public Optional<ReviewCase> findByTransactionId(String transactionId) {

@@ -77,8 +77,18 @@ public class TransactionLedger {
         }
     }
 
+    /**
+     * 保存拒绝留痕。transactionId 缺失（空 ID 的非法流水）时以指纹为键，
+     * 避免空键导致系统级错误，同时保证同一非法输入只留痕一次。
+     */
     public void saveRejection(RejectionRecord rejection) {
-        rejections.putIfAbsent(rejection.transactionId(), rejection);
+        rejections.putIfAbsent(rejectionKey(rejection), rejection);
+    }
+
+    /** 拒绝记录的账本键：优先 transactionId，空 ID 退化为指纹键。 */
+    public static String rejectionKey(RejectionRecord rejection) {
+        String txId = rejection.transactionId();
+        return (txId == null || txId.isBlank()) ? "NO-ID:" + rejection.fingerprint() : txId;
     }
 
     public List<Transaction> transactionsOfAccount(String accountId) {

@@ -52,10 +52,10 @@ public class RiskScoringService {
     public SubmissionOutcome submit(Transaction tx) {
         String id = tx == null ? null : tx.transactionId();
         if (id == null || id.isBlank()) {
-            return submitBatch(List.of(tx)).get(0);
+            return submitBatch(new ArrayList<>(java.util.Collections.singletonList(tx))).get(0);
         }
         synchronized (txLocks.computeIfAbsent(id, k -> new Object())) {
-            return submitBatch(List.of(tx)).get(0);
+            return submitBatch(new ArrayList<>(java.util.Collections.singletonList(tx))).get(0);
         }
     }
 
@@ -89,12 +89,20 @@ public class RiskScoringService {
             toProcess.add(tx);
         }
 
-        // 2) 收集去重（保留首次出现的对象/顺序），空 ID 逐条拒绝
+        // 2) 收集去重（保留首次出现的对象/顺序），空 ID 逐条拒绝并留痕（只校验一次，
+        //    返回给调用方的与账本中持久化的是同一条记录，保证各入口留痕一致）
         Map<String, Transaction> unique = new LinkedHashMap<>();
-        List<Transaction> nullIdTx = new ArrayList<>();
+        List<RejectionRecord> nullIdRejections = new ArrayList<>();
         for (Transaction tx : toProcess) {
             if (tx == null || tx.transactionId() == null || tx.transactionId().isBlank()) {
-                nullIdTx.add(tx);
+                RejectionRecord rejection = validator.validate(tx);
+                nullIdRejections.add(rejection);
+                if (rejection != null) {
+                    ledger.saveRejection(rejection);
+                    log.warn("[REJECT] tx={} reason={} detail={} fingerprint={}",
+                            rejection.transactionId(), rejection.reason(),
+                            rejection.detail(), rejection.fingerprint());
+                }
             } else {
                 unique.putIfAbsent(tx.transactionId(), tx);
             }
@@ -113,16 +121,11 @@ public class RiskScoringService {
         for (Transaction tx : ordered) {
             fresh.put(tx.transactionId(), pipeline.evaluate(tx, true));
         }
-        for (Transaction tx : nullIdTx) {
-            RejectionRecord rejection = validator.validate(tx);
-            if (rejection != null) {
-                ledger.saveRejection(rejection);
-                log.warn("[REJECT] tx=null reason={} detail={}", rejection.reason(), rejection.detail());
-            }
-        }
 
-        // 5) 按输入顺序回填：新交易取本次结论，重复输入标记 duplicate=true
+        // 5) 按输入顺序回填：新交易取本次结论，重复输入标记 duplicate=true；
+        //    空 ID 输入按出现顺序取第 2 步已留痕的同一条拒绝记录
         Map<String, Integer> seenInBatch = new LinkedHashMap<>();
+        int nullIdCursor = 0;
         int freshCount = 0;
         for (int i = 0; i < inputs.size(); i++) {
             if (results.get(i) != null) {
@@ -130,8 +133,7 @@ public class RiskScoringService {
             }
             Transaction tx = inputs.get(i);
             if (tx == null || tx.transactionId() == null || tx.transactionId().isBlank()) {
-                RejectionRecord r = validator.validate(tx);
-                results.set(i, SubmissionOutcome.rejected(r, false));
+                results.set(i, SubmissionOutcome.rejected(nullIdRejections.get(nullIdCursor++), false));
                 continue;
             }
             String id = tx.transactionId();

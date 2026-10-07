@@ -48,19 +48,43 @@ public class DataSeeder implements CommandLineRunner {
         BatchReport ordered = simulator.run("demo-ordered", events, ArrivalMode.IN_ORDER);
         BatchReport shuffled = simulator.run("demo-shuffled", events, ArrivalMode.OUT_OF_ORDER);
         BatchReport concurrent = simulator.run("demo-concurrent", events, ArrivalMode.CONCURRENT);
-        log.info("[DEMO] 顺序: 接受={} 拒绝={} 重复={} 开案={}",
-                ordered.accepted(), ordered.rejected(), ordered.duplicates(), ordered.casesOpened());
-        log.info("[DEMO] 乱序: 接受={} 拒绝={} 重复={} 开案={}",
-                shuffled.accepted(), shuffled.rejected(), shuffled.duplicates(), shuffled.casesOpened());
-        log.info("[DEMO] 并发: 接受={} 拒绝={} 重复={} 开案={}",
-                concurrent.accepted(), concurrent.rejected(), concurrent.duplicates(), concurrent.casesOpened());
+        log.info("[DEMO] 顺序: 接受={} 拒绝={} 重复={} 开案={} 账户归集案={}",
+                ordered.accepted(), ordered.rejected(), ordered.duplicates(),
+                ordered.casesOpened(), ordered.accountCasesOpened());
+        log.info("[DEMO] 乱序: 接受={} 拒绝={} 重复={} 开案={} 账户归集案={}",
+                shuffled.accepted(), shuffled.rejected(), shuffled.duplicates(),
+                shuffled.casesOpened(), shuffled.accountCasesOpened());
+        log.info("[DEMO] 并发: 接受={} 拒绝={} 重复={} 开案={} 账户归集案={}",
+                concurrent.accepted(), concurrent.rejected(), concurrent.duplicates(),
+                concurrent.casesOpened(), concurrent.accountCasesOpened());
         boolean same = ordered.accepted() == shuffled.accepted()
                 && ordered.accepted() == concurrent.accepted()
                 && ordered.rejected() == shuffled.rejected()
                 && ordered.rejected() == concurrent.rejected()
                 && ordered.casesOpened() == shuffled.casesOpened()
-                && ordered.casesOpened() == concurrent.casesOpened();
+                && ordered.casesOpened() == concurrent.casesOpened()
+                && ordered.accountCasesOpened() == shuffled.accountCasesOpened()
+                && ordered.accountCasesOpened() == concurrent.accountCasesOpened();
         log.info("[DEMO] 三种到达方式计数一致: {}", same);
+
+        // 账户级归集演示：同一账户窗口内 3 笔高风险流水 -> 1 个账户级案件
+        List<Transaction> aggEvents = List.of(
+                new Transaction("AGG-D1", "A900", new BigDecimal("20000"), "CNY",
+                        t0(), "CP-A", "KY", "WEB"),
+                new Transaction("AGG-D2", "A900", new BigDecimal("21000"), "CNY",
+                        t0().plusSeconds(120), "CP-B", "KY", "WEB"),
+                new Transaction("AGG-D3", "A900", new BigDecimal("22000"), "CNY",
+                        t0().plusSeconds(240), "CP-C", "KY", "WEB"));
+        BatchReport agg = simulator.run("demo-aggregation", aggEvents, ArrivalMode.IN_ORDER);
+        log.info("[DEMO] 账户级归集: 账户=A900 高风险流水=3 账户归集案={} 单笔开案={}",
+                agg.accountCasesOpened(), agg.casesOpened());
+    }
+
+    private Instant t0() {
+        Instant now = Instant.now(clock);
+        Instant night = now.atOffset(ZoneOffset.UTC)
+                .withHour(2).withMinute(30).withSecond(0).withNano(0).toInstant();
+        return night.isAfter(now) ? night.minus(Duration.ofDays(1)) : night;
     }
 
     /**
